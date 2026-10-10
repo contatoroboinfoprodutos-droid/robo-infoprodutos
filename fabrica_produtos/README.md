@@ -285,3 +285,17 @@ Os produtos apareciam "Sem imagem" porque o robô nunca enviava capa (e nem gera
   depois de cada uma. Toda tentativa imprime `CAKTO_IMAGEM_DEBUG` com o corpo da resposta e as chaves do produto.
   A forma que funcionar é lembrada para os próximos produtos.
 - `capas` agora também cria na Cakto (sem entrega, `waiting_config`) o produto que nunca chegou lá (ex.: `p20261004-1`).
+
+## Capa na Cakto sem imagem e rodízio de produtos (PR #23)
+
+- **Envio da capa**: além de `image`=URL, multipart, `image_url`/`thumbnail`, base64 e PATCH, agora o robô tenta o arquivo
+  binário no campo `file` (multipart) e um upload separado (`POST` multipart `file` em `/public_api/upload/`, `files/`,
+  `media/`, `images/`, `uploads/` e `products/{id}/image/`). Se algum devolver uma URL, ela vai no `image` e é confirmada
+  com GET. Endpoints que responderem 404/405 não são tentados de novo. Tudo deixa linhas `CAKTO_IMAGEM_DEBUG`.
+- **Se a API não gravar**: `CAKTO_EXIGE_IMAGEM` continua `false` (padrão) e os produtos ficam **Ativos** sem imagem.
+  O resumo do passo `capas` lista cada produto com o arquivo `docs/capas/{id}.png`, e o workflow `produto.yml` publica o
+  artefato **capas-cakto** (zip). Upload manual: `app.cakto.com.br/dashboard/products` > produto > Editar produto > imagem.
+- **Rodízio**: os posts não anunciam mais sempre o produto mais novo. `catalogo.produto_da_vez()` gira entre todos os
+  produtos `pronto` com link válido (2 fatias por dia, antes/depois das 20h UTC). `PRODUTO_DA_VEZ_ID` fixa um produto
+  (e é definido na primeira chamada, para `main.py`, ferramentas e config do Low Ticket concordarem na mesma execução).
+  A criação diária de 3 produtos novos (`FABRICA_MAX_POR_DIA=3`) continua alimentando o rodízio.

@@ -125,6 +125,7 @@ def enviar_capas(nomes: list[str] | None = None) -> list[str]:
     alvo = [p for p in catalogo.carregar()["produtos"] if p.get("status") in ("pronto", "aguardando_cadastro")]
     if not alvo:
         return ["nenhum produto na Cakto para conferir"]
+    manuais = []
     for p in alvo:
         for plat in ativas:
             try:
@@ -148,6 +149,7 @@ def enviar_capas(nomes: list[str] | None = None) -> list[str]:
                     plat.enviar_imagem(achado["id"], urls_da_capa(p, capa_path, linhas), capa_path, p)
                 except plataformas.ErroPlataforma as e:
                     linhas.append(f"CAKTO_IMAGEM_ERROR: {p['id']} http={e.codigo or '-'} {e}")
+                    manuais.append(p)
                     print(f"CAKTO_IMAGEM_ERROR produto={p['id']} http={e.codigo or '-'} {e}", flush=True)
                     continue
                 linhas.append(f"{p['id']}: capa enviada")
@@ -156,7 +158,21 @@ def enviar_capas(nomes: list[str] | None = None) -> list[str]:
                     linhas.append(f"{p['id']}: ativado ({r.get('status')})")
             except plataformas.ErroPlataforma as e:
                 linhas.append(f"{p['id']} / {plat.nome}: erro ({e})")
+    linhas.extend(guia_upload_manual(manuais))
     return linhas
+
+
+def guia_upload_manual(produtos: list[dict]) -> list[str]:
+    """Quando a API não grava a imagem, a capa sobe à mão: uma linha por produto com nome, arquivo e link da capa."""
+    if not produtos:
+        return []
+    repo = os.getenv("GITHUB_REPOSITORY", "fabricadeprodutosdigitais/fabrica-de-produtos-digitais")
+    out = ["UPLOAD MANUAL DAS CAPAS: a API da Cakto não gravou a imagem. Painel: app.cakto.com.br/dashboard/products "
+           "> abra o produto > Editar produto > imagem > envie o arquivo abaixo (também no artefato 'capas-cakto' do workflow). "
+           "Os produtos já estão ativos e podem ser postados sem imagem."]
+    for p in produtos:
+        out.append(f"  - {p['nome']}: docs/capas/{p['id']}.png (https://raw.githubusercontent.com/{repo}/main/docs/capas/{p['id']}.png)")
+    return out
 
 
 def publicar_pdf(produto: dict, pacote: dict, linhas: list[str]) -> str | None:

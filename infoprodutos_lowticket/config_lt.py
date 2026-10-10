@@ -24,7 +24,7 @@ OFFER_LINK = os.getenv("LT_OFFER_LINK", "").strip() or "https://SEU-LINK-DE-CHEC
 # é bloqueado em modo real (travas.py), porque não há o que vender nem o que conferir.
 try:
     from fabrica_produtos import catalogo as _catalogo
-    PRODUTO = _catalogo.produto_ativo()
+    PRODUTO = _catalogo.produto_da_vez()
 except Exception:  # catálogo ausente ou ilegível: segue sem produto
     PRODUTO = None
 if PRODUTO:

@@ -33,7 +33,7 @@ class Servidor:
     def __call__(self, metodo, url, **kw):
         self.chamadas.append((metodo, url, kw))
         caminho = url.split("api.cakto.com.br")[1]
-        item = self.rotas[(metodo, caminho)]
+        item = self.rotas.get((metodo, caminho)) or Resp(404, {"detail": "Not found"})  # rota fora da doc = 404
         if isinstance(item, list):
             item = item.pop(0)
         return item(kw) if callable(item) else item

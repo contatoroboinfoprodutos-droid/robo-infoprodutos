@@ -69,6 +69,7 @@ class Cakto:
         self._token = ""
         self._estrategia_ok = ""          # forma de envio de imagem que já funcionou nesta execução
         self._produtos_sem_sucesso = 0     # produtos em que nenhuma forma funcionou
+        self._upload_inexistente: set = set()  # endpoints de upload que responderam 404/405
 
     # -- credenciais --
     def faltando(self) -> list[str]:
@@ -218,6 +219,8 @@ class Cakto:
             for campo in ("image_url", "imageUrl", "thumbnail"):
                 out.append((f"json {campo}=URL", "PUT", {"json": {**base, campo: u}}))
         if arquivo:
+            out.append(("multipart file=binario", "PUT",
+                        {"data": base, "files": {"file": (os.path.basename(capa_path), arquivo, "image/png")}}))
             out.append(("multipart thumbnail=arquivo", "PUT",
                         {"data": base, "files": {"thumbnail": (os.path.basename(capa_path), arquivo, "image/png")}}))
             out.append(("json image=base64", "PUT", {"json": {**base, "image": "data:image/png;base64," +
@@ -225,6 +228,54 @@ class Cakto:
         for u in urls[:1]:
             out.append(("PATCH json image=URL", "PATCH", {"json": {**base, "image": u}}))
         return out
+
+    ENDPOINTS_UPLOAD = ("/public_api/upload/", "/public_api/files/", "/public_api/media/",
+                        "/public_api/images/", "/public_api/uploads/")
+
+    @staticmethod
+    def _url_na_resposta(corpo) -> str:
+        """Primeira string http(s) achada na resposta de um upload (url, file, image, link...)."""
+        if isinstance(corpo, str):
+            return corpo if corpo.startswith("http") else ""
+        if isinstance(corpo, dict):
+            for k in ("url", "file", "image", "link", "location", "path", "src"):
+                v = Cakto._url_na_resposta(corpo.get(k))
+                if v:
+                    return v
+            for v in corpo.values():
+                v = Cakto._url_na_resposta(v)
+                if v:
+                    return v
+        if isinstance(corpo, list):
+            for v in corpo:
+                v = Cakto._url_na_resposta(v)
+                if v:
+                    return v
+        return ""
+
+    def subir_arquivo(self, capa_path: str | None, produto_id: str = "") -> str:
+        """Tenta um endpoint de upload separado (multipart, campo `file`). Devolve a URL hospedada ou ''.
+        A doc não lista nenhum: 404/405 marca o endpoint como inexistente e ele não é tentado de novo."""
+        if not capa_path or not os.path.isfile(capa_path):
+            return ""
+        with open(capa_path, "rb") as f:
+            dados = f.read()
+        candidatos = [e for e in self.ENDPOINTS_UPLOAD if e not in self._upload_inexistente]
+        if produto_id:
+            candidatos.append(f"/public_api/products/{produto_id}/image/")
+        for ep in candidatos:
+            try:
+                resp = self._req("POST", ep, files={"file": (os.path.basename(capa_path), dados, "image/png")})
+            except ErroPlataforma as e:
+                print(f"CAKTO_IMAGEM_DEBUG upload endpoint={ep} http={e.codigo or '-'} erro={str(e)[:200]}", flush=True)
+                if e.codigo in (404, 405):
+                    self._upload_inexistente.add(ep)
+                continue
+            url = self._url_na_resposta(resp)
+            print(f"CAKTO_IMAGEM_DEBUG upload endpoint={ep} ok corpo={self._corpo(resp)} url={url or None}", flush=True)
+            if url:
+                return url
+        return ""
 
     def enviar_imagem(self, produto_id: str, urls: list[str] | None = None, capa_path: str | None = None,
                       produto: dict | None = None) -> str:
@@ -237,6 +288,11 @@ class Cakto:
         só tentam as 2 primeiras formas (as demais iriam falhar do mesmo jeito e gastar a cota de requisições)."""
         base = dados_obrigatorios(produto) if produto else {}
         todas = self._estrategias(urls or [], capa_path, base)
+        if capa_path and not self._produtos_sem_sucesso:  # upload separado: só no 1º produto, se nada falhou antes
+            hospedada = self.subir_arquivo(capa_path, produto_id)
+            if hospedada:
+                todas.insert(0, (f"json image=URL(upload {hospedada.split('/')[2]})", "PUT",
+                                 {"json": {**base, "image": hospedada}}))
         if not todas:
             raise ErroPlataforma("cakto: nenhuma URL nem arquivo de capa para enviar")
         if self._estrategia_ok:
