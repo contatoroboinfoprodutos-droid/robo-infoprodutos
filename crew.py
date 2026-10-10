@@ -135,14 +135,14 @@ def get_llm() -> LLM:
             raise RuntimeError('OPENROUTER_API_KEY não configurada (LLM_PROVIDER=openrouter).')
         modelo = model_healer.resolver_modelo(settings.openrouter_model, settings.openrouter_api_key)
         if modelo:
-            return LLM(
+            return model_healer.proteger_llm(LLM(
                 model="openai/" + modelo,
                 base_url="https://openrouter.ai/api/v1",
                 api_key=settings.openrouter_api_key,
                 temperature=0.7,
                 timeout=240,
                 max_tokens=2048,
-            )
+            ), settings.openrouter_api_key)
         # Nenhum modelo gratuito respondeu: segue com Gemini ou Groq se houver chave (nunca um modelo pago).
         logger.warning("Nenhum modelo gratuito do OpenRouter respondeu; usando GEMINI/GROQ se houver chave.")
         provider = 'groq' if (settings.groq_api_key and not settings.gemini_api_key) else 'gemini'

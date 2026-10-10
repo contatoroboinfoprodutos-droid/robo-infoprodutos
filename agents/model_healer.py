@@ -28,6 +28,7 @@ PREFERIDOS = (
     "google/gemini-2.0-flash-exp:free",
     "meta-llama/llama-3.2-3b-instruct:free",
     "qwen/qwen-2.5-coder-32b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
 )
 MAX_TESTES = 6
 
@@ -134,8 +135,8 @@ def curar(modelo_atual: str, api_key: str, sessao=requests) -> str | None:
     """Troca o modelo desatualizado por um gratuito que funciona. Loga o aviso e tenta atualizar a Variable."""
     novo = get_free_model(api_key, evitar=modelo_atual, sessao=sessao)
     if novo:
-        logger.warning("⚠️ Variable desatualizada, auto-trocado para %s", novo)
-        print(f"⚠️ Variable desatualizada, auto-trocado para {novo}", flush=True)
+        logger.warning("⚠️ AUTO-HEAL: OPENROUTER_MODEL desatualizado, usando %s", novo)
+        print(f"⚠️ AUTO-HEAL: OPENROUTER_MODEL desatualizado, usando {novo}", flush=True)
         if atualizar_variable(novo):
             logger.info("model_healer: Variable OPENROUTER_MODEL atualizada para %s", novo)
     return novo
@@ -157,3 +158,30 @@ def resolver_modelo(modelo_atual: str, api_key: str, sessao=requests) -> str | N
     if indisponivel(f"{r.status_code} {r.text}") or r.status_code == 404:
         return curar(modelo_atual, api_key, sessao)
     return modelo_atual
+
+
+def proteger_llm(llm, api_key: str, prefixo: str = "openai/", sessao=requests):
+    """Troca o modelo NO MEIO da execução: se uma chamada ao LLM voltar 404 'unavailable for free' (o slug saiu do ar
+    depois do teste inicial, ou ninguém testou), escolhe outro gratuito, atualiza `llm.model` e repete a chamada UMA vez.
+    Qualquer outro erro passa como está. Devolve o próprio `llm`."""
+    original = getattr(llm, "call", None)
+    if original is None:
+        return llm
+
+    def call(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except Exception as e:
+            if not indisponivel(e):
+                raise
+            atual = str(getattr(llm, "model", "") or "")
+            novo = curar(atual[len(prefixo):] if atual.startswith(prefixo) else atual, api_key, sessao)
+            if not novo:
+                raise
+            llm.model = prefixo + novo
+            return original(*args, **kwargs)
+    try:
+        llm.call = call
+    except (AttributeError, TypeError):  # classe que não aceita atributo novo: segue sem proteção em tempo de execução
+        logger.warning("model_healer: não consegui proteger o LLM em tempo de execução")
+    return llm

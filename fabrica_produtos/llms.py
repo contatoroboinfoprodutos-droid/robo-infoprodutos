@@ -75,13 +75,18 @@ def construir_llm(provedor: str, modelo: str, max_tokens: int = 6000, temperatur
         return LLM(model="openai/" + modelo, base_url=GROQ_BASE_URL, api_key=_env("GROQ_API_KEY"),
                    temperature=temperature, max_tokens=max_tokens, timeout=timeout)
     if provedor == "openrouter":
-        try:  # modelo gratuito que saiu do ar (404): troca por outro gratuito que responde
+        llm = LLM(model="openai/" + modelo, base_url=OPENROUTER_BASE_URL, api_key=_env("OPENROUTER_API_KEY"),
+                  temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+        try:  # slug gratuito que saiu do ar (404): troca por outro gratuito, na partida e no meio da execução
             from agents import model_healer
-            modelo = model_healer.resolver_modelo(modelo, _env("OPENROUTER_API_KEY")) or modelo
+            novo = model_healer.resolver_modelo(modelo, _env("OPENROUTER_API_KEY"))
+            if novo and novo != modelo:
+                llm = LLM(model="openai/" + novo, base_url=OPENROUTER_BASE_URL, api_key=_env("OPENROUTER_API_KEY"),
+                          temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+            model_healer.proteger_llm(llm, _env("OPENROUTER_API_KEY"))
         except Exception as e:  # o healer nunca pode derrubar a fábrica
             logger.warning("model_healer indisponível: %s", e)
-        return LLM(model="openai/" + modelo, base_url=OPENROUTER_BASE_URL, api_key=_env("OPENROUTER_API_KEY"),
-                   temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+        return llm
     raise ValueError(f"provedor desconhecido: {provedor}")
 
 

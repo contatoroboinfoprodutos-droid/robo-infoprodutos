@@ -34,6 +34,7 @@ LISTA = {"data": [
     {"id": "qwen/qwen-2.5-coder-32b-instruct:free", "pricing": {"prompt": "0", "completion": "0"}},
     {"id": "google/gemini-2.0-flash-exp:free", "pricing": {"prompt": "0", "completion": "0"}},
     {"id": "meta-llama/llama-3.2-3b-instruct:free", "pricing": {"prompt": "0", "completion": "0"}},
+    {"id": "mistralai/mistral-7b-instruct:free", "pricing": {"prompt": "0", "completion": "0"}},
     {"id": "qwen/qwen3-coder", "pricing": {"prompt": "0.0000003", "completion": "0.0000012"}},   # pago: nunca
     {"id": "algum/modelo:free", "pricing": {"prompt": "0.000001", "completion": "0"}},            # ':free' mas cobra
     {"id": "outro/gratis:free", "pricing": {"prompt": "0", "completion": "0"}},
@@ -73,7 +74,7 @@ class Healer(unittest.TestCase):
         self.assertIn("outro/gratis:free", achados)
 
     def test_ordem_de_preferencia(self):
-        self.assertEqual(mh.ordenar(mh.listar_modelos_gratis(Sessao()))[:3], list(mh.PREFERIDOS))
+        self.assertEqual(mh.ordenar(mh.listar_modelos_gratis(Sessao()))[:4], list(mh.PREFERIDOS))
 
     def test_pega_o_primeiro_preferido_que_responde(self):
         s = Sessao(ok={"google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.2-3b-instruct:free"})
@@ -112,7 +113,7 @@ class Healer(unittest.TestCase):
         with self.assertLogs("fabrica.model_healer", "WARNING") as logs:
             novo = mh.resolver_modelo("qwen/qwen3-coder:free", "k", s)
         self.assertEqual(novo, "google/gemini-2.0-flash-exp:free")
-        self.assertTrue(any("Variable desatualizada, auto-trocado para google/gemini-2.0-flash-exp:free" in m
+        self.assertTrue(any("AUTO-HEAL: OPENROUTER_MODEL desatualizado, usando google/gemini-2.0-flash-exp:free" in m
                             for m in logs.output))
 
     def test_resolver_mantem_modelo_que_funciona_ou_com_limite_de_uso(self):
@@ -133,6 +134,37 @@ class Healer(unittest.TestCase):
         args = chamadas.call_args[0][0]
         self.assertIn("PATCH", args)
         self.assertIn("repos/o/r/actions/variables/OPENROUTER_MODEL", args)
+
+    def test_proteger_llm_troca_o_modelo_no_meio_da_execucao_e_repete_uma_vez(self):
+        class LLM:
+            model = "openai/qwen/qwen3-coder:free"
+            chamadas = []
+
+            def call(self, *a, **k):
+                self.chamadas.append(self.model)
+                if self.model == "openai/qwen/qwen3-coder:free":
+                    raise RuntimeError("404 qwen/qwen3-coder:free not found: This model is unavailable for free")
+                return "ok"
+        s = Sessao(ok={"google/gemini-2.0-flash-exp:free"})
+        llm = mh.proteger_llm(LLM(), "k", sessao=s)
+        self.assertEqual(llm.call("oi"), "ok")
+        self.assertEqual(llm.chamadas, ["openai/qwen/qwen3-coder:free", "openai/google/gemini-2.0-flash-exp:free"])
+
+    def test_proteger_llm_nao_mexe_em_outros_erros(self):
+        class LLM:
+            model = "openai/a/b:free"
+
+            def call(self, *a, **k):
+                raise RuntimeError("429 rate limit")
+        llm = mh.proteger_llm(LLM(), "k", sessao=Sessao())
+        with self.assertRaises(RuntimeError):
+            llm.call("x")
+
+    def test_resolver_publico_em_tools_model_resolver(self):
+        from tools import model_resolver as mr
+        self.assertIs(mr.get_free_model, mh.get_free_model)
+        self.assertEqual(len(mr.PREFERIDOS), 4)
+        self.assertEqual(mr.PREFERIDOS[3], "mistralai/mistral-7b-instruct:free")
 
     def test_indisponivel(self):
         self.assertTrue(mh.indisponivel("404 qwen/qwen3-coder:free not found: This model is unavailable for free"))

@@ -1,3 +1,4 @@
+import os
 from crewai import Agent, LLM
 from . import config_lt as cfg
 from .tools_lt import lt_render_card, lt_publicar_meta, lt_publicar_tiktok
@@ -14,8 +15,18 @@ if not _api_key:
 
 if cfg.LLM_PROVIDER == "openrouter":
     # OpenRouter e Groq são compatíveis com a API da OpenAI: o prefixo "openai/" + base_url funciona em qualquer versão do CrewAI.
-    _llm = LLM(model="openai/" + cfg.LLM_MODEL, base_url=cfg.OPENROUTER_BASE_URL,
-               api_key=_api_key, temperature=0.7, max_tokens=2048, timeout=240)
+    # O slug gratuito pode sair do ar (404 "unavailable for free"): o healer troca por outro gratuito e, se nenhum
+    # responder, cai para o Gemini (nunca para modelo pago).
+    from agents import model_healer
+    _modelo = model_healer.resolver_modelo(cfg.LLM_MODEL, _api_key) if not cfg.DRY_RUN else cfg.LLM_MODEL
+    if _modelo:
+        _llm = model_healer.proteger_llm(LLM(model="openai/" + _modelo, base_url=cfg.OPENROUTER_BASE_URL,
+                                             api_key=_api_key, temperature=0.7, max_tokens=2048, timeout=240), _api_key)
+    elif cfg.GEMINI_API_KEY:
+        _llm = LLM(model=os.getenv("GEMINI_MODEL", "").strip() or "gemini/gemini-3.8-flash", api_key=cfg.GEMINI_API_KEY,
+                   temperature=0.7, max_tokens=2048, timeout=240)
+    else:
+        raise RuntimeError("Nenhum modelo gratuito do OpenRouter respondeu e não há GEMINI_API_KEY de reserva.")
 elif cfg.LLM_PROVIDER == "groq":
     _llm = LLM(model="openai/" + cfg.LLM_MODEL, base_url=cfg.GROQ_BASE_URL,
                api_key=_api_key, temperature=0.7, max_tokens=2048, timeout=240)

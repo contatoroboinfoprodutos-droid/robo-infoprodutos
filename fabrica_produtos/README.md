@@ -273,3 +273,15 @@ Os produtos apareciam "Sem imagem" porque o robô nunca enviava capa (e nem gera
 - `CAKTO_EXIGE_IMAGEM` agora vale `false` por padrão (produto é ativado mesmo sem capa) até a imagem ser confirmada na
   Cakto; `true` volta a exigir a capa antes de ativar.
 - A ação `capas` varre a Cakto, acha produtos sem `image` e reenvia com o payload completo (idempotente).
+
+### Modelo gratuito que cura sozinho + diagnóstico da imagem da Cakto (PR #22)
+- `tools/model_resolver.py` (`get_free_model`, `resolver_modelo`, `proteger_llm`; implementação em `agents/model_healer.py`).
+  Ordem de preferência: gemini-2.0-flash-exp, llama-3.2-3b, qwen-2.5-coder-32b, mistral-7b (todos `:free`, preço zero).
+  Agora também cobre o robô **Low Ticket** (`infoprodutos_lowticket/agents.py`, que antes não passava pelo healer: era a
+  origem do 404 recorrente) e troca de modelo **no meio da execução** se uma chamada voltar "unavailable for free".
+  Log: `⚠️ AUTO-HEAL: OPENROUTER_MODEL desatualizado, usando X`. Sem gratuito que responda: Gemini/Groq, nunca pago.
+- Imagem da Cakto: a API respondeu 200 mas não gravou. O robô agora tenta, em ordem, `image`=URL do GitHub Pages,
+  `image`=URL raw, arquivo multipart, `image_url`/`imageUrl`/`thumbnail`, data URI base64 e PATCH, e confere por GET
+  depois de cada uma. Toda tentativa imprime `CAKTO_IMAGEM_DEBUG` com o corpo da resposta e as chaves do produto.
+  A forma que funcionar é lembrada para os próximos produtos.
+- `capas` agora também cria na Cakto (sem entrega, `waiting_config`) o produto que nunca chegou lá (ex.: `p20261004-1`).

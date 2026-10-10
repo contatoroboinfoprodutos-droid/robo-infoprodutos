@@ -94,16 +94,25 @@ REPO_PADRAO = "fabricadeprodutosdigitais/fabrica-de-produtos-digitais"
 
 
 def urls_da_capa(produto: dict, capa_path: str | None, linhas: list[str]) -> list[str]:
-    """URL pública da capa: GitHub raw (repositório público). O Drive NÃO é usado para imagem: a conta de serviço não
-    tem cota no Meu Drive. A URL só entra se já responder como imagem, ou seja, depois do commit do workflow."""
+    """URLs públicas candidatas da capa, na ordem: GitHub Pages (Content-Type image/png garantido, site com .nojekyll) e
+    GitHub raw. O Drive NÃO é usado: a conta de serviço não tem cota no Meu Drive. Cada URL só entra se já responder
+    como imagem (ou seja, depois do commit do workflow). O teste é feito do runner do GitHub, não da Cakto: se a Cakto
+    não consegue baixar, o `CAKTO_IMAGEM_DEBUG` da tentativa mostra o que a API devolveu."""
     repo = os.getenv("GITHUB_REPOSITORY", "").strip() or REPO_PADRAO
+    dono, _, nome_repo = repo.partition("/")
     ref = os.getenv("GITHUB_REF_NAME", "").strip() or "main"
-    raw = f"https://raw.githubusercontent.com/{repo}/{ref}/docs/capas/{produto['id']}.png"
-    if _acessivel(raw):
-        return [raw]
-    linhas.append(f"{produto['id']}: a capa ainda não está em {ref} (raw responde sem imagem); "
-                  "segue com o envio do arquivo e a próxima execução usa a URL")
-    return []
+    candidatas = [f"https://{dono}.github.io/{nome_repo}/docs/capas/{produto['id']}.png",
+                  f"https://raw.githubusercontent.com/{repo}/{ref}/docs/capas/{produto['id']}.png"]
+    urls = []
+    for u in candidatas:
+        ok = _acessivel(u)
+        print(f"CAKTO_IMAGEM_DEBUG url={u} responde_como_imagem_no_runner={ok}", flush=True)
+        if ok:
+            urls.append(u)
+    if not urls:
+        linhas.append(f"{produto['id']}: a capa ainda não responde como imagem no GitHub Pages nem no raw; "
+                      "segue com o envio do arquivo e a próxima execução usa a URL")
+    return urls
 
 
 def enviar_capas(nomes: list[str] | None = None) -> list[str]:
@@ -120,6 +129,14 @@ def enviar_capas(nomes: list[str] | None = None) -> list[str]:
         for plat in ativas:
             try:
                 achado = plat.buscar_por_nome(p["nome"])
+                if not achado and p.get("status") == "aguardando_cadastro":
+                    # nunca chegou na Cakto (ex.: p20261004-1): cria agora, sem entrega (o Drive não grava), em
+                    # waiting_config; a capa sobe em seguida e a entrega do PDF você configura no painel
+                    pacote = gerar_pacote(p)
+                    criado = plat.criar_produto(p, pacote["pdf"])
+                    linhas.append(f"{p['id']}: não existia na {plat.nome}; criado agora (status {criado.get('status')}, "
+                                  "sem entrega do PDF: configure no painel e ative)")
+                    achado = plat.buscar_por_nome(p["nome"]) or criado
                 if not achado:
                     linhas.append(f"{p['id']}: não encontrado na {plat.nome} pelo nome")
                     continue

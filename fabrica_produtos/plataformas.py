@@ -11,6 +11,8 @@ NÃO foi testado contra uma conta real. Os endereços podem ser trocados por var
 comando `sondar` (somente leitura) mostra no log o que a sua conta aceita de verdade.
 Nenhuma função aqui imprime credencial, token ou o corpo da resposta de autenticação.
 """
+import base64
+import json
 import logging
 import os
 import time
@@ -65,6 +67,8 @@ class Cakto:
         self.base = (_env("CAKTO_BASE_URL") or "https://api.cakto.com.br").rstrip("/")
         self.pay_base = (_env("CAKTO_PAY_BASE") or "https://pay.cakto.com.br").rstrip("/")
         self._token = ""
+        self._estrategia_ok = ""          # forma de envio de imagem que já funcionou nesta execução
+        self._produtos_sem_sucesso = 0     # produtos em que nenhuma forma funcionou
 
     # -- credenciais --
     def faltando(self) -> list[str]:
@@ -178,34 +182,94 @@ class Cakto:
             r = self.finalizar(r["id"], urls_imagem, capa_path, produto) | {"existente": False}
         return r
 
+    # Chaves em que a resposta da Cakto pode devolver a imagem do produto (a documentação só cita `image`).
+    CHAVES_DE_IMAGEM = ("image", "imageUrl", "image_url", "thumbnail", "thumbnailUrl", "cover", "coverUrl", "picture",
+                        "photo", "banner", "logo")
+
+    def _imagem_no_json(self, j) -> str:
+        if isinstance(j, dict):
+            for k in self.CHAVES_DE_IMAGEM:
+                if j.get(k):
+                    return str(j[k])
+        return ""
+
+    @staticmethod
+    def _corpo(j, limite: int = 400) -> str:
+        try:
+            t = json.dumps(j, ensure_ascii=False)
+        except (TypeError, ValueError):
+            t = str(j)
+        return t[:limite]
+
+    def _estrategias(self, urls: list[str], capa_path: str | None, base: dict) -> list[tuple]:
+        """(nome, método, argumentos do requests), da forma documentada para as alternativas.
+        1) `image` = URL (a doc); 2) arquivo binário em multipart; 3) outros nomes de campo; 4) data URI base64; 5) PATCH."""
+        out = []
+        for u in urls:
+            out.append((f"json image=URL({u.split('/')[2]})", "PUT", {"json": {**base, "image": u}}))
+        arquivo = None
+        if capa_path and os.path.isfile(capa_path):
+            with open(capa_path, "rb") as f:
+                arquivo = f.read()
+            nome = os.path.basename(capa_path)
+            out.append(("multipart image=arquivo", "PUT",
+                        {"data": base, "files": {"image": (nome, arquivo, "image/png")}}))
+        for u in urls[:1]:
+            for campo in ("image_url", "imageUrl", "thumbnail"):
+                out.append((f"json {campo}=URL", "PUT", {"json": {**base, campo: u}}))
+        if arquivo:
+            out.append(("multipart thumbnail=arquivo", "PUT",
+                        {"data": base, "files": {"thumbnail": (os.path.basename(capa_path), arquivo, "image/png")}}))
+            out.append(("json image=base64", "PUT", {"json": {**base, "image": "data:image/png;base64," +
+                                                              base64.b64encode(arquivo).decode()}}))
+        for u in urls[:1]:
+            out.append(("PATCH json image=URL", "PATCH", {"json": {**base, "image": u}}))
+        return out
+
     def enviar_imagem(self, produto_id: str, urls: list[str] | None = None, capa_path: str | None = None,
                       produto: dict | None = None) -> str:
-        """Põe a capa no produto. `image` é URL pública (PUT /products/{id}/). O PUT exige name, description e price
-        (a execução real devolveu 400 'obrigatório' só com `image`): `produto` (catálogo) fornece esses dados e eles vão
-        junto em cada tentativa. Tenta cada URL; se todas forem recusadas e houver o arquivo, tenta o PNG em multipart.
-        Só devolve se o produto realmente passou a ter `image`. Falha = ErroPlataforma com o código HTTP."""
-        erros = []
+        """Põe a capa no produto e CONFIRMA lendo o produto de volta (a Cakto já respondeu 200 sem gravar nada).
+        O PUT exige name, description e price: `produto` (catálogo) fornece esses dados. Tenta, em ordem, `image`=URL
+        (cada URL pública), arquivo multipart, outros nomes de campo, data URI base64 e PATCH, e para na primeira que
+        fizer o produto ter imagem. Cada tentativa deixa uma linha CAKTO_IMAGEM_DEBUG (corpo recortado da resposta e
+        chaves do produto), para ver o que a API realmente devolve. Se nada funcionar: ErroPlataforma com o código HTTP.
+        A estratégia vencedora é lembrada para os próximos produtos; depois que tudo falha em um produto, os seguintes
+        só tentam as 2 primeiras formas (as demais iriam falhar do mesmo jeito e gastar a cota de requisições)."""
         base = dados_obrigatorios(produto) if produto else {}
-        for url in urls or []:
+        todas = self._estrategias(urls or [], capa_path, base)
+        if not todas:
+            raise ErroPlataforma("cakto: nenhuma URL nem arquivo de capa para enviar")
+        if self._estrategia_ok:
+            todas.sort(key=lambda e: e[0] != self._estrategia_ok)
+        elif self._produtos_sem_sucesso:
+            todas = todas[:2]
+        ultimo_codigo, resumo = None, []
+        for nome, metodo, kw in todas:
             try:
-                self._req("PUT", f"/public_api/products/{produto_id}/", json={**base, "image": url})
-                if self._resumo(self._req("GET", f"/public_api/products/{produto_id}/"))["imagem"]:
-                    return url
-                erros.append(ErroPlataforma(f"cakto: PUT aceito mas o produto continua sem imagem ({url[:60]})", 200))
+                resp = self._req(metodo, f"/public_api/products/{produto_id}/", **kw)
+                status_txt, ultimo_codigo = "200", 200
             except ErroPlataforma as e:
-                erros.append(e)
-        if capa_path and os.path.isfile(capa_path):
+                print(f"CAKTO_IMAGEM_DEBUG produto={produto_id} tentativa='{nome}' http={e.codigo or '-'} erro={str(e)[:300]}",
+                      flush=True)
+                resumo.append(f"{nome}: HTTP {e.codigo or '-'}")
+                ultimo_codigo = e.codigo or ultimo_codigo
+                continue
             try:
-                with open(capa_path, "rb") as f:
-                    self._req("PUT", f"/public_api/products/{produto_id}/", data=base,
-                              files={"image": (os.path.basename(capa_path), f.read(), "image/png")})
-                if self._resumo(self._req("GET", f"/public_api/products/{produto_id}/"))["imagem"]:
-                    return "multipart"
-                erros.append(ErroPlataforma("cakto: envio multipart aceito mas o produto continua sem imagem", 200))
+                atual = self._req("GET", f"/public_api/products/{produto_id}/")
             except ErroPlataforma as e:
-                erros.append(e)
-        ultimo = erros[-1] if erros else ErroPlataforma("cakto: nenhuma URL nem arquivo de capa para enviar")
-        raise ErroPlataforma(f"{ultimo} (tentativas: {len(erros)})", getattr(ultimo, "codigo", None))
+                resumo.append(f"{nome}: PUT ok, GET falhou")
+                continue
+            achada = self._imagem_no_json(atual)
+            print(f"CAKTO_IMAGEM_DEBUG produto={produto_id} tentativa='{nome}' put={status_txt} "
+                  f"put_body={self._corpo(resp)} get_image={achada[:80] or None} "
+                  f"get_chaves={sorted(atual.keys()) if isinstance(atual, dict) else type(atual).__name__}", flush=True)
+            if achada:
+                self._estrategia_ok = nome
+                return achada
+            resumo.append(f"{nome}: PUT aceito mas o produto continua sem imagem")
+        self._produtos_sem_sucesso += 1
+        raise ErroPlataforma("cakto: nenhuma forma de envio fez a imagem aparecer no produto (" +
+                             "; ".join(resumo)[:600] + ")", ultimo_codigo)
 
     def _entrega(self, produto_id: str, url_entrega: str) -> None:
         self._req("PUT", f"/public_api/products/{produto_id}/",

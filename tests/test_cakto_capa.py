@@ -31,10 +31,16 @@ class Base(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def rotas(self, put, get_final):
+        def repetir(item):  # lista = respostas em ordem; a última se repete (o robô agora tenta várias formas)
+            if not isinstance(item, list):
+                return item
+            fila = list(item)
+            return lambda kw: fila.pop(0) if len(fila) > 1 else fila[0]
         return {("GET", "/public_api/products/"): Resp(200, {"results": []}),
                 ("POST", "/public_api/products/"): Resp(201, produto_api(NOME, status="waiting_config", pid="u1")),
                 ("PUT", "/public_api/products/u1/"): put,
-                ("GET", "/public_api/products/u1/"): get_final}
+                ("PATCH", "/public_api/products/u1/"): put,
+                ("GET", "/public_api/products/u1/"): repetir(get_final)}
 
 
 class Capa(Base):
@@ -84,9 +90,10 @@ class EnvioDaImagem(Base):
             return Resp(400, {}, "bad") if "json" in kw else Resp(200, {})
         c, srv = cliente(self.rotas(put, [Resp(200, com)]))
         self.usar(srv)
-        self.assertEqual(c.enviar_imagem("u1", ["https://a/x.png"], arq), "multipart")
+        self.assertEqual(c.enviar_imagem("u1", ["https://a/x.png"], arq), "https://cdn/x.png")
         self.assertIn("image", vistos[-1]["files"])
         self.assertEqual(vistos[-1]["files"]["image"][2], "image/png")
+        self.assertEqual(c._estrategia_ok, "multipart image=arquivo")
 
     def test_falha_loga_CAKTO_IMAGEM_ERROR_com_codigo_e_nao_ativa_quando_exige(self):
         os.environ["CAKTO_EXIGE_IMAGEM"] = "true"
@@ -125,6 +132,69 @@ class EnvioDaImagem(Base):
             c.enviar_imagem("u1", [], None)
 
 
+class DepuracaoEEstrategias(Base):
+    def test_200_sem_gravar_experimenta_as_outras_formas_e_loga_DEBUG_com_o_corpo(self):
+        arq = capa.gerar_capa({"id": "x", "nome": "Guia de Receitas"}, os.path.join(self.tmp.name, "x.png"))
+        sem = produto_api(NOME, pid="u1")
+        com = {**sem, "imageUrl": "https://cdn/ok.png"}      # só o campo `imageUrl` “pega”
+        chamadas = []
+
+        def put(kw):
+            chamadas.append(kw)
+            return Resp(200, {"ok": True, "echo": list((kw.get("json") or {}).keys())})
+
+        def get(kw):
+            j = chamadas[-1].get("json") or {}
+            return Resp(200, com if "imageUrl" in j else sem)
+        c, srv = cliente(self.rotas(put, get))
+        self.usar(srv)
+        with mock.patch("builtins.print") as pr:
+            achada = c.enviar_imagem("u1", ["https://a/x.png"], arq, {**produto_bom(), "preco": 8.9})
+        self.assertEqual(achada, "https://cdn/ok.png")
+        self.assertEqual(c._estrategia_ok, "json imageUrl=URL")
+        saida = "\n".join(str(x.args[0]) for x in pr.call_args_list)
+        self.assertIn("CAKTO_IMAGEM_DEBUG", saida)
+        self.assertIn("put_body=", saida)
+        self.assertIn("get_chaves=", saida)
+        # todas as tentativas levaram name/description/price
+        for kw in chamadas:
+            corpo = kw.get("json") or kw.get("data")
+            self.assertEqual(corpo["price"], "8.90")
+
+    def test_estrategia_vencedora_e_lembrada_para_o_proximo_produto(self):
+        com = {**produto_api(NOME, pid="u1"), "image": "https://x/y.png"}
+        c, srv = cliente(self.rotas(Resp(200, {}), com and Resp(200, com)))
+        self.usar(srv)
+        c._estrategia_ok = "json image=URL(raw.githubusercontent.com)"
+        c.enviar_imagem("u1", ["https://raw.githubusercontent.com/o/r/main/a.png", "https://b/x.png"])
+        primeiro_put = next(kw for m, u, kw in srv.chamadas if m == "PUT")
+        self.assertIn("raw.githubusercontent.com", primeiro_put["json"]["image"])
+
+    def test_depois_de_falhar_em_um_produto_os_seguintes_so_tentam_2_formas(self):
+        sem = produto_api(NOME, pid="u1")
+        arq = capa.gerar_capa({"id": "x", "nome": "Guia"}, os.path.join(self.tmp.name, "x.png"))
+        c, srv = cliente(self.rotas(Resp(200, {}), Resp(200, sem)))
+        self.usar(srv)
+        with mock.patch("builtins.print"):
+            with self.assertRaises(plataformas.ErroPlataforma):
+                c.enviar_imagem("u1", ["https://a/x.png"], arq)
+            antes = sum(1 for m, *_ in srv.chamadas if m == "PUT")
+            with self.assertRaises(plataformas.ErroPlataforma):
+                c.enviar_imagem("u1", ["https://a/x.png"], arq)
+        depois = sum(1 for m, *_ in srv.chamadas if m == "PUT") - antes
+        self.assertGreater(antes, 4)
+        self.assertEqual(depois, 2)
+
+    def test_estrategias_cobrem_url_arquivo_outros_campos_base64_e_patch(self):
+        arq = capa.gerar_capa({"id": "x", "nome": "Guia"}, os.path.join(self.tmp.name, "x.png"))
+        c = plataformas.Cakto()
+        nomes = [n for n, _, _ in c._estrategias(["https://pages/x.png", "https://raw/x.png"], arq, {"name": "n"})]
+        for esperado in ("json image=URL(pages)", "json image=URL(raw)", "multipart image=arquivo", "json image_url=URL",
+                         "json imageUrl=URL", "json thumbnail=URL", "multipart thumbnail=arquivo", "json image=base64",
+                         "PATCH json image=URL"):
+            self.assertIn(esperado, nomes)
+
+
 class Reparo(Base):
     """`capas`: produtos que já estão na Cakto 'Sem imagem' (os 5 do dashboard) ganham capa e, se estavam esperando só
     por ela, são ativados."""
@@ -156,9 +226,28 @@ class Reparo(Base):
             linhas = registrador.enviar_capas()
         put = next(kw["json"] for m, u, kw in srv.chamadas if m == "PUT")
         self.assertEqual(put, {"name": NOME, "description": produto_bom()["descricao_oferta"], "price": "7.00",
-                               "image": f"https://raw.githubusercontent.com/o/r/main/docs/capas/{self.id}.png"})
+                               "image": f"https://o.github.io/r/docs/capas/{self.id}.png"})   # Pages vem antes do raw
         self.assertTrue(any("capa enviada" in l for l in linhas))
         self.assertTrue(os.path.exists(os.path.join(self.tmp.name, f"{self.id}.png")))
+
+    def test_produto_que_nao_existe_na_cakto_e_aguardando_cadastro_e_criado_e_recebe_capa(self):
+        catalogo.atualizar(self.id, "volta", status="aguardando_cadastro", link_compra="")
+        criado = produto_api(NOME, status="waiting_config", pid="u9")
+        com = {**criado, "image": "https://o.github.io/r/x.png"}
+        posts = []
+        c, srv = cliente({("GET", "/public_api/products/"): [Resp(200, {"results": []}), Resp(200, {"results": []}),
+                                                             Resp(200, {"results": [{"id": "u9", "name": NOME}]})],
+                          ("POST", "/public_api/products/"): lambda kw: (posts.append(kw["json"]), Resp(201, criado))[1],
+                          ("GET", "/public_api/products/u9/"): [Resp(200, criado), Resp(200, com)],
+                          ("PUT", "/public_api/products/u9/"): Resp(200, {})})
+        self.usar(srv)
+        with mock.patch.object(plataformas, "instanciar", return_value=[c]), \
+                mock.patch.object(registrador, "gerar_pacote", return_value={"pdf": "x.pdf"}):
+            linhas = registrador.enviar_capas()
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["status"], "waiting_config")
+        self.assertTrue(any("criado agora" in l for l in linhas))
+        self.assertTrue(any("capa enviada" in l for l in linhas))
 
     def test_produto_que_ja_tem_imagem_e_pulado(self):
         com = {**produto_api(NOME, pid="u1"), "image": "https://x/y.png"}
@@ -188,7 +277,8 @@ class Reparo(Base):
         sem = produto_api(NOME, pid="u1")
         c, srv = cliente({("GET", "/public_api/products/"): Resp(200, {"results": [{"id": "u1", "name": NOME}]}),
                           ("GET", "/public_api/products/u1/"): Resp(200, sem),
-                          ("PUT", "/public_api/products/u1/"): Resp(422, {}, "image: invalid")})
+                          ("PUT", "/public_api/products/u1/"): Resp(422, {}, "image: invalid"),
+                          ("PATCH", "/public_api/products/u1/"): Resp(422, {}, "image: invalid")})
         self.usar(srv)
         with mock.patch.object(plataformas, "instanciar", return_value=[c]), mock.patch("builtins.print"):
             linhas = registrador.enviar_capas()
@@ -217,7 +307,9 @@ class UrlAcessivel(unittest.TestCase):
             os.environ.pop("GITHUB_REPOSITORY", None)
             os.environ.pop("GITHUB_REF_NAME", None)
             urls = registrador.urls_da_capa({"id": "p20261005-1"}, None, [])
-        self.assertEqual(urls, ["https://raw.githubusercontent.com/fabricadeprodutosdigitais/fabrica-de-produtos-digitais/"
+        self.assertEqual(urls, ["https://fabricadeprodutosdigitais.github.io/fabrica-de-produtos-digitais/docs/capas/"
+                                "p20261005-1.png",
+                                "https://raw.githubusercontent.com/fabricadeprodutosdigitais/fabrica-de-produtos-digitais/"
                                 "main/docs/capas/p20261005-1.png"])
         self.assertFalse(hasattr(__import__("fabrica_produtos.drive", fromlist=["Drive"]).Drive, "publicar_imagem"))
 
