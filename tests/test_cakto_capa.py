@@ -195,6 +195,50 @@ class DepuracaoEEstrategias(Base):
             self.assertIn(esperado, nomes)
 
 
+class ArquivoEUpload(Base):
+    def test_arquivo_binario_no_campo_file_esta_entre_as_formas(self):
+        arq = capa.gerar_capa({"id": "x", "nome": "Guia de Receitas"}, os.path.join(self.tmp.name, "x.png"))
+        c, _ = cliente({})
+        nomes = [n for n, _, kw in c._estrategias(["https://a/x.png"], arq, {})]
+        self.assertIn("multipart file=binario", nomes)
+        kw = [k for n, _, k in c._estrategias([], arq, {}) if n == "multipart file=binario"][0]
+        self.assertEqual(kw["files"]["file"][2], "image/png")
+        self.assertTrue(kw["files"]["file"][1].startswith(b"\x89PNG"))
+
+    def test_upload_separado_devolve_url_que_vai_no_image_e_e_confirmada(self):
+        arq = capa.gerar_capa({"id": "x", "nome": "Guia de Receitas"}, os.path.join(self.tmp.name, "x.png"))
+        com = {**produto_api(NOME, pid="u1"), "image": "https://cdn.cakto/x.png"}
+        rotas = self.rotas(Resp(200, {}), Resp(200, com))
+        rotas[("POST", "/public_api/upload/")] = Resp(201, {"data": {"url": "https://cdn.cakto/x.png"}})
+        c, srv = cliente(rotas)
+        self.usar(srv)
+        self.assertEqual(c.enviar_imagem("u1", [], arq, {**produto_bom(), "preco": 8.9}), "https://cdn.cakto/x.png")
+        put = [kw["json"] for m, u, kw in srv.chamadas if m == "PUT"][0]
+        self.assertEqual(put["image"], "https://cdn.cakto/x.png")
+
+    def test_endpoint_404_nao_e_tentado_de_novo(self):
+        arq = capa.gerar_capa({"id": "x", "nome": "Guia de Receitas"}, os.path.join(self.tmp.name, "x.png"))
+        c, srv = cliente({})
+        self.usar(srv)
+        with mock.patch("builtins.print"):
+            self.assertEqual(c.subir_arquivo(arq), "")
+            antes = len(srv.chamadas)
+            self.assertEqual(c.subir_arquivo(arq), "")
+        self.assertEqual(len(srv.chamadas), antes)
+
+    def test_guia_manual_lista_arquivo_e_caminho_do_painel(self):
+        linhas = registrador.guia_upload_manual([{"id": "p1", "nome": "Guia X"}])
+        txt = "\n".join(linhas)
+        self.assertIn("app.cakto.com.br/dashboard/products", txt)
+        self.assertIn("docs/capas/p1.png", txt)
+        self.assertEqual(registrador.guia_upload_manual([]), [])
+
+    def test_workflow_guarda_as_capas_como_artefato(self):
+        txt = open(os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "produto.yml")).read()
+        self.assertIn("upload-artifact", txt)
+        self.assertIn("docs/capas/*.png", txt)
+
+
 class Reparo(Base):
     """`capas`: produtos que já estão na Cakto 'Sem imagem' (os 5 do dashboard) ganham capa e, se estavam esperando só
     por ela, são ativados."""

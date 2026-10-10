@@ -127,7 +127,7 @@ def main() -> None:
         logger.info("Nicho da rodada (rodízio): %s", args.topic)
 
     # Produto: a campanha é SEMPRE de um produto real do catálogo (status 'pronto', com link de compra).
-    produto = catalogo.produto_ativo()
+    produto = catalogo.produto_da_vez()
     if produto is None and not settings.dry_run:
         logger.warning(
             "Nenhum produto 'pronto' no catálogo: sem produto real não há o que anunciar. "

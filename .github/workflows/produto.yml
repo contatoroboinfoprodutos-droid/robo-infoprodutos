@@ -102,6 +102,14 @@ jobs:
         continue-on-error: true   # erro de imagem aparece como CAKTO_IMAGEM_ERROR no resumo; nao derruba o commit do catalogo
         run: python -m fabrica_produtos capas
 
+      - name: Capas para upload manual na Cakto (baixe o zip e envie pelo painel se a API nao gravar a imagem)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capas-cakto
+          path: docs/capas/*.png
+          if-no-files-found: ignore
+
       - name: Guarda o catalogo no repositorio
         if: always()
         run: |

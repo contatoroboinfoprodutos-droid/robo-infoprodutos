@@ -122,3 +122,30 @@ def produto_ativo(caminho: str | None = None) -> dict | None:
         if p.get("status") == "pronto" and link_ok(p.get("link_compra", "")):
             return p
     return None
+
+
+def produtos_prontos(caminho: str | None = None) -> list[dict]:
+    """Todos os produtos 'pronto' com link de compra válido, do mais antigo ao mais novo."""
+    return [p for p in carregar(caminho)["produtos"]
+            if p.get("status") == "pronto" and link_ok(p.get("link_compra", ""))]
+
+
+def produto_da_vez(caminho: str | None = None, agora=None) -> dict | None:
+    """Rodízio entre os produtos prontos, para o feed não repetir sempre a mesma capa.
+
+    Cada dia tem 2 fatias (antes/depois das 20h UTC), então produtos consecutivos aparecem em
+    sequência. PRODUTO_DA_VEZ_ID força um produto (usado para main.py, ferramentas e config_lt
+    concordarem dentro da mesma execução). Sem produtos prontos devolve None."""
+    prontos = produtos_prontos(caminho)
+    if not prontos:
+        return None
+    forcado = os.getenv("PRODUTO_DA_VEZ_ID", "").strip()
+    if forcado:
+        for p in prontos:
+            if p.get("id") == forcado:
+                return p
+    agora = agora or _agora()
+    indice = (agora.toordinal() * 2 + (1 if agora.hour >= 20 else 0)) % len(prontos)
+    escolhido = prontos[indice]
+    os.environ["PRODUTO_DA_VEZ_ID"] = escolhido.get("id", "")
+    return escolhido

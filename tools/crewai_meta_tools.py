@@ -18,7 +18,7 @@ from fabrica_produtos import catalogo, marcas, travas
 def _preparar(texto: str, rede: str | None = None):
     """Travas em código: o texto só pode afirmar o que está no catálogo. Devolve
     (produto, texto_corrigido, ajustes, problemas). Problemas = não publicar em modo real."""
-    produto = catalogo.produto_ativo()
+    produto = catalogo.produto_da_vez()
     legenda, acoes, problemas = travas.preparar_legenda(produto, texto, "VITRINE", rede)
     return produto, legenda, acoes, problemas
 
